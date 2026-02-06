@@ -214,7 +214,7 @@ def fetch_residential(lat, lon, radius_m):
 
 
 def main():
-    st.set_page_config(layout="wide", page_title="City POI Rings Analysis")
+    st.set_page_config(layout="wide", page_title="City POI Analysis")
     st.title("City data analysis")
 
     if "cities_data" not in st.session_state:
@@ -359,11 +359,11 @@ def main():
         # Display the chart using st.plotly_chart
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Map: POIs used for venue count")
+        st.subheader("Map: POIs used for count")
 
         # Выбор города для карты (если городов несколько)
         city_names = [d["city"] for d in st.session_state.cities_data]
-        selected_city = st.selectbox("City for map", city_names, index=len(city_names) - 1)
+        selected_city = st.selectbox("Map for city", city_names, index=len(city_names) - 1)
 
         city_data = next(d for d in st.session_state.cities_data if d["city"] == selected_city)
         pois_df = city_data["pois"]
