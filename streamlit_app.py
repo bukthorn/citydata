@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import pydeck as pdk
 
 # ---- Overpass mirrors (rotate on failure) ----
 OVERPASS_URLS = [
@@ -180,7 +181,6 @@ def fetch_pois(lat, lon, radius_m):
     [out:json][timeout:240];
     (
       nwr(around:{radius_m},{lat},{lon})["amenity"~"^({amen_re})$"];
-      nwr(around:{radius_m},{lat},{lon})["shop"="coffee"];
     );
     out center tags;
     """
@@ -303,6 +303,8 @@ def main():
 
                         st.session_state.cities_data.append({
                             "city": city_input,
+                            "center": {"lat": float(lat), "lon": float(lon)},
+                            "pois": df_pois[["lat", "lon", "name", "amenity"]].copy(),
                             "rings": rings
                         })
                         st.success(f"City {city_input} added!")
@@ -356,6 +358,119 @@ def main():
 
         # Display the chart using st.plotly_chart
         st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Map: POIs used for venue count")
+
+        # Выбор города для карты (если городов несколько)
+        city_names = [d["city"] for d in st.session_state.cities_data]
+        selected_city = st.selectbox("City for map", city_names, index=len(city_names) - 1)
+
+        city_data = next(d for d in st.session_state.cities_data if d["city"] == selected_city)
+        pois_df = city_data["pois"]
+        center = city_data["center"]
+
+        if pois_df is None or pois_df.empty:
+            st.info("No POIs to show on the map for this city.")
+        else:
+            # PyDeck map (Mapbox-style). Если нет MAPBOX_TOKEN, всё равно отрисуется базовая карта.
+            view_state = pdk.ViewState(
+                latitude=float(center["lat"]),
+                longitude=float(center["lon"]),
+                zoom=10,
+                pitch=0
+            )
+
+            # ---- Тип POI для раскраски: только amenity (shop=coffee удалён из проекта)
+            pois_df = pois_df.copy()
+
+            # гарантируем наличие amenity и приводим к строке
+            if "amenity" not in pois_df.columns:
+                pois_df["amenity"] = ""
+
+            pois_df["poi_type"] = pois_df["amenity"].fillna("").astype(str)
+
+            # ---- Цветовая палитра (без чёрного/белого)
+            color_map = {
+                "restaurant": [231, 76, 60],     # красный
+                "cafe": [46, 204, 113],          # зелёный
+                "bar": [155, 89, 182],           # фиолетовый
+                "pub": [241, 196, 15],           # жёлтый
+                "fast_food": [230, 126, 34],     # оранжевый
+                "food_court": [52, 152, 219],    # синий
+                "canteen": [26, 188, 156],       # бирюзовый
+            }
+            default_color = [149, 165, 166]      # серо-голубой (не белый/чёрный)
+
+            pois_df["color"] = pois_df["poi_type"].apply(lambda t: color_map.get(t, default_color))
+
+            # ---- Легенда (вверху справа над картой, прижата вправо)
+            legend_items = []
+            present_types = [t for t in color_map.keys() if (pois_df["poi_type"] == t).any()]
+            for t in present_types:
+                rgb = color_map[t]
+                label = t.replace("_", " ")
+                legend_items.append(
+                    f"""
+                    <div style="display:flex;align-items:center;gap:8px;margin:2px 0;">
+                    <div style="width:12px;height:12px;border-radius:50%;background:rgb({rgb[0]},{rgb[1]},{rgb[2]});"></div>
+                    <div style="font-size:12px;line-height:12px;">{label}</div>
+                    </div>
+                    """
+                )
+
+            if legend_items:
+                st.markdown(
+                    f"""
+                    <div style="display:flex;justify-content:flex-end;">
+                    <div style="
+                        background: rgba(50,50,50,0.92);
+                        padding:10px 12px;
+                        border-radius:10px;
+                        border: 1px solid rgba(0,0,0,0.08);
+                        max-width: 260px;
+                    ">
+                        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">POI legend</div>
+                        {''.join(legend_items)}
+                    </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # ---- PyDeck слой точек
+            view_state = pdk.ViewState(
+                latitude=float(center["lat"]),
+                longitude=float(center["lon"]),
+                zoom=10,
+                pitch=0
+            )
+
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=pois_df,
+                get_position="[lon, lat]",
+                get_radius=20,
+                get_fill_color="color",
+                pickable=True,
+                auto_highlight=True,
+                stroked=False,
+                filled=True,
+            )
+
+            tooltip = {
+                "html": "<b>{name}</b><br/>Type: {poi_type}<br/>Lat: {lat}<br/>Lon: {lon}",
+                "style": {"backgroundColor": "white", "color": "black"}
+            }
+
+            deck = pdk.Deck(
+                layers=[layer],
+                initial_view_state=view_state,
+                tooltip=tooltip,
+            )
+
+            st.pydeck_chart(deck, use_container_width=True)
+
+
     else:
         st.info("Add a city in the sidebar to start analysis.")
 
