@@ -223,7 +223,7 @@ def main():
     with st.sidebar:
         st.header("Add City")
         city_input = st.text_input("City Name", "Moscow")
-        max_rings_input = st.number_input("Distance (km)",
+        max_rings_input = st.number_input("Radius (km)",
                                           min_value=1,
                                           value=10)
         if st.button("Calculate and Add"):
@@ -361,9 +361,30 @@ def main():
 
         st.subheader("Map: POIs used for count")
 
-        # Выбор города для карты (если городов несколько)
+        col_mm_label, col_mm_radio = st.columns([0.3, 3.7], vertical_alignment="center")
+        with col_mm_label:
+            st.markdown("**Map mode**")
+        with col_mm_radio:
+            map_mode = st.radio(
+                "",
+                options=["POI", "Heatmap"],
+                index=0,
+                horizontal=True,
+                label_visibility="collapsed"
+    )
+
         city_names = [d["city"] for d in st.session_state.cities_data]
-        selected_city = st.selectbox("Map for city", city_names, index=len(city_names) - 1)
+
+        col_city_label, col_city_select = st.columns([0.3, 3.7], vertical_alignment="center")
+        with col_city_label:
+            st.markdown("**Map for city**")
+        with col_city_select:
+            selected_city = st.selectbox(
+                "",
+                city_names,
+                index=len(city_names) - 1,
+                label_visibility="collapsed"
+            )
 
         city_data = next(d for d in st.session_state.cities_data if d["city"] == selected_city)
         pois_df = city_data["pois"]
@@ -371,105 +392,199 @@ def main():
 
         if pois_df is None or pois_df.empty:
             st.info("No POIs to show on the map for this city.")
+        
         else:
-            # PyDeck map (Mapbox-style). Если нет MAPBOX_TOKEN, всё равно отрисуется базовая карта.
-            view_state = pdk.ViewState(
-                latitude=float(center["lat"]),
-                longitude=float(center["lon"]),
-                zoom=10,
-                pitch=0
-            )
-
-            # ---- Тип POI для раскраски: только amenity (shop=coffee удалён из проекта)
+            # --- Map via Plotly Mapbox: legend overlays map + interactive toggle by type ---
             pois_df = pois_df.copy()
 
             # гарантируем наличие amenity и приводим к строке
             if "amenity" not in pois_df.columns:
                 pois_df["amenity"] = ""
-
             pois_df["poi_type"] = pois_df["amenity"].fillna("").astype(str)
 
-            # ---- Цветовая палитра (без чёрного/белого)
+            # Цветовая палитра (без чёрного/белого) — нужна только для режима POI
             color_map = {
-                "restaurant": [231, 76, 60],     # красный
-                "cafe": [46, 204, 113],          # зелёный
-                "bar": [155, 89, 182],           # фиолетовый
-                "pub": [241, 196, 15],           # жёлтый
-                "fast_food": [230, 126, 34],     # оранжевый
-                "food_court": [52, 152, 219],    # синий
-                "canteen": [26, 188, 156],       # бирюзовый
+                "restaurant": "rgb(231,76,60)",
+                "cafe": "rgb(46,204,113)",
+                "bar": "rgb(155,89,182)",
+                "pub": "rgb(241,196,15)",
+                "fast_food": "rgb(230,126,34)",
+                "food_court": "rgb(52,152,219)",
+                "canteen": "rgb(26,188,156)",
             }
-            default_color = [149, 165, 166]      # серо-голубой (не белый/чёрный)
-
-            pois_df["color"] = pois_df["poi_type"].apply(lambda t: color_map.get(t, default_color))
-
-            # ---- Легенда (вверху справа над картой, прижата вправо)
-            legend_items = []
+            default_color = "rgb(149,165,166)"
             present_types = [t for t in color_map.keys() if (pois_df["poi_type"] == t).any()]
-            for t in present_types:
-                rgb = color_map[t]
-                label = t.replace("_", " ")
-                legend_items.append(
-                    f"""
-                    <div style="display:flex;align-items:center;gap:8px;margin:2px 0;">
-                    <div style="width:12px;height:12px;border-radius:50%;background:rgb({rgb[0]},{rgb[1]},{rgb[2]});"></div>
-                    <div style="font-size:12px;line-height:12px;">{label}</div>
-                    </div>
-                    """
+
+            map_fig = go.Figure()
+
+            if map_mode == "POI":
+                # --- POI mode (как сейчас): отдельный trace на каждый тип => легенда интерактивная ---
+                for t in present_types:
+                    sub = pois_df[pois_df["poi_type"] == t]
+                    map_fig.add_trace(
+                        go.Scattermapbox(
+                            lat=sub["lat"].astype(float).tolist(),
+                            lon=sub["lon"].astype(float).tolist(),
+                            mode="markers",
+                            name=t.replace("_", " "),
+                            marker=dict(size=8, color=color_map.get(t, default_color)),
+                            customdata=sub[["name", "poi_type"]].astype(str).values.tolist(),
+                            hovertemplate="<b>%{customdata[0]}</b><br>Type: %{customdata[1]}<br>Lat: %{lat}<br>Lon: %{lon}<extra></extra>",
+                        )
+                    )
+
+                # Остальные типы (если есть) — отдельная серия
+                other = pois_df[~pois_df["poi_type"].isin(present_types)]
+                if not other.empty:
+                    map_fig.add_trace(
+                        go.Scattermapbox(
+                            lat=other["lat"].astype(float).tolist(),
+                            lon=other["lon"].astype(float).tolist(),
+                            mode="markers",
+                            name="other",
+                            marker=dict(size=8, color=default_color),
+                            customdata=other[["name", "poi_type"]].astype(str).values.tolist(),
+                            hovertemplate="<b>%{customdata[0]}</b><br>Type: %{customdata[1]}<br>Lat: %{lat}<br>Lon: %{lon}<extra></extra>",
+                        )
+                    )
+
+                map_fig.update_layout(
+                    mapbox=dict(
+                        style="carto-darkmatter",
+                        center=dict(lat=float(center["lat"]), lon=float(center["lon"])),
+                        zoom=10,
+                    ),
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    height=520,
+                    legend=dict(
+                        x=0.01, y=0.99,
+                        xanchor="left", yanchor="top",
+                        bgcolor="rgba(30,30,30,0.9)",
+                        bordercolor="rgba(0,0,0,0.12)",
+                        borderwidth=1,
+                        itemclick="toggle",
+                        itemdoubleclick="toggleothers",
+                    ),
                 )
 
-            if legend_items:
-                st.markdown(
-                    f"""
-                    <div style="display:flex;justify-content:flex-end;">
-                    <div style="
-                        background: rgba(50,50,50,0.92);
-                        padding:10px 12px;
-                        border-radius:10px;
-                        border: 1px solid rgba(0,0,0,0.08);
-                        max-width: 260px;
-                    ">
-                        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">POI legend</div>
-                        {''.join(legend_items)}
-                    </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
+            else:
+                # --- Heatmap mode: реальная метрика POI per 1 km² (квадраты 1×1 км) ---
+                lat0 = float(center["lat"])
+                lon0 = float(center["lon"])
+                R = 6371008.8
+                cos_lat0 = math.cos(math.radians(lat0))
+
+                tmp = pois_df.copy()
+
+                # x,y в метрах (приближённая локальная проекция относительно центра)
+                tmp["x_m"] = R * math.radians(1.0) * (tmp["lon"].astype(float) - lon0) * cos_lat0
+                tmp["y_m"] = R * math.radians(1.0) * (tmp["lat"].astype(float) - lat0)
+
+                cell = 1000.0  # 1 км
+                tmp["cx"] = (tmp["x_m"] // cell).astype(int)
+                tmp["cy"] = (tmp["y_m"] // cell).astype(int)
+
+                # Count POI в каждой ячейке 1×1 км (это и есть POI/км²)
+                grid = tmp.groupby(["cx", "cy"], as_index=False).size().rename(columns={"size": "poi_per_km2"})
+                grid["cell_id"] = grid["cx"].astype(str) + "_" + grid["cy"].astype(str)
+
+                # --- Smoothing 3x3 (center=4, sides=2, diagonals=1) ---
+                vals = {(int(r.cx), int(r.cy)): float(r.poi_per_km2) for r in grid.itertuples(index=False)}
+
+                kernel = {
+                    (0, 0): 4,
+                    (1, 0): 2, (-1, 0): 2, (0, 1): 2, (0, -1): 2,
+                    (1, 1): 1, (1, -1): 1, (-1, 1): 1, (-1, -1): 1,
+                }
+                w_sum = sum(kernel.values())
+
+                smoothed = []
+                for r in grid.itertuples(index=False):
+                    cx = int(r.cx)
+                    cy = int(r.cy)
+                    acc = 0.0
+                    for (dx, dy), w in kernel.items():
+                        acc += w * vals.get((cx + dx, cy + dy), 0.0)
+                    smoothed.append(acc / w_sum)
+
+                grid["poi_per_km2_smoothed"] = smoothed
+
+                # Функция перевода метрических смещений -> lat/lon
+                def xy_to_latlon(x_m: float, y_m: float) -> tuple[float, float]:
+                    lat = lat0 + (y_m / (R * math.radians(1.0)))
+                    lon = lon0 + (x_m / (R * math.radians(1.0) * cos_lat0))
+                    return lat, lon
+
+                # Строим GeoJSON FeatureCollection из квадратов
+                features = []
+                for _, row in grid.iterrows():
+                    cx = int(row["cx"])
+                    cy = int(row["cy"])
+                    cell_id = row["cell_id"]
+
+                    x0 = cx * cell
+                    x1 = (cx + 1) * cell
+                    y0 = cy * cell
+                    y1 = (cy + 1) * cell
+
+                    # 4 угла квадрата (в lon/lat для GeoJSON)
+                    lat_a, lon_a = xy_to_latlon(x0, y0)  # нижний-левый
+                    lat_b, lon_b = xy_to_latlon(x1, y0)  # нижний-правый
+                    lat_c, lon_c = xy_to_latlon(x1, y1)  # верхний-правый
+                    lat_d, lon_d = xy_to_latlon(x0, y1)  # верхний-левый
+
+                    features.append(
+                        {
+                            "type": "Feature",
+                            "id": cell_id,
+                            "properties": {"cell_id": cell_id},
+                            "geometry": {
+                                "type": "Polygon",
+                                "coordinates": [[
+                                    [lon_a, lat_a],
+                                    [lon_b, lat_b],
+                                    [lon_c, lat_c],
+                                    [lon_d, lat_d],
+                                    [lon_a, lat_a],
+                                ]],
+                            },
+                        }
+                    )
+
+                geojson = {"type": "FeatureCollection", "features": features}
+
+                # Рисуем квадраты как choropleth
+                map_fig.add_trace(
+                    go.Choroplethmapbox(
+                        geojson=geojson,
+                        locations=grid["cell_id"].tolist(),
+                        z=grid["poi_per_km2"].astype(float).tolist(),
+                        featureidkey="id",
+                        colorscale="Turbo",
+                        zmin=0,
+                        marker_opacity=0.75,
+                        marker_line_width=0,  # без границ, чтобы выглядело как heatmap
+                        colorbar=dict(
+                            title="POI / 1 km²",
+                            thickness=14,
+                            len=0.55,
+                        ),
+                        hovertemplate="POI / 1 km²: <b>%{z}</b><extra></extra>",
+                    )
                 )
 
-            # ---- PyDeck слой точек
-            view_state = pdk.ViewState(
-                latitude=float(center["lat"]),
-                longitude=float(center["lon"]),
-                zoom=10,
-                pitch=0
-            )
+                map_fig.update_layout(
+                    mapbox=dict(
+                        style="carto-darkmatter",
+                        center=dict(lat=lat0, lon=lon0),
+                        zoom=10,
+                    ),
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    height=520,
+                    showlegend=False,
+                )            
 
-            layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=pois_df,
-                get_position="[lon, lat]",
-                get_radius=20,
-                get_fill_color="color",
-                pickable=True,
-                auto_highlight=True,
-                stroked=False,
-                filled=True,
-            )
-
-            tooltip = {
-                "html": "<b>{name}</b><br/>Type: {poi_type}<br/>Lat: {lat}<br/>Lon: {lon}",
-                "style": {"backgroundColor": "white", "color": "black"}
-            }
-
-            deck = pdk.Deck(
-                layers=[layer],
-                initial_view_state=view_state,
-                tooltip=tooltip,
-            )
-
-            st.pydeck_chart(deck, use_container_width=True)
-
+            st.plotly_chart(map_fig, use_container_width=True)
 
     else:
         st.info("Add a city in the sidebar to start analysis.")
