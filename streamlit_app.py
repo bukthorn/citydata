@@ -118,7 +118,10 @@ def estimate_floors(building_type: str, tags: Dict[str, str]) -> int:
 def overpass(query: str,
              retries: int = 6,
              backoff_sec: float = 3.0) -> Dict[str, Any]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "citydata-streamlit-app/1.0",
+    }
     last_err = None
     for attempt in range(retries):
         url = OVERPASS_URLS[attempt % len(OVERPASS_URLS)]
@@ -127,6 +130,18 @@ def overpass(query: str,
                               data=query.encode("utf-8"),
                               headers=headers,
                               timeout=240)
+            if r.status_code == 429 or r.status_code == 504:
+                retry_after = r.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        wait = backoff_sec * (attempt + 2)
+                else:
+                    wait = backoff_sec * (attempt + 2)
+                last_err = requests.HTTPError(f"Overpass HTTP {r.status_code}")
+                time.sleep(wait)
+                continue
             if r.status_code >= 400:
                 raise requests.HTTPError(f"Overpass HTTP {r.status_code}")
             return r.json()
@@ -147,6 +162,7 @@ def parse_population(tags: Dict[str, str]) -> int:
         return -1
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_city_center(city_name: str) -> Tuple[float, float, Dict[str, str]]:
     city_esc = city_name.replace('"', r'\"')
     q = f"""
@@ -175,6 +191,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return EARTH_RADIUS_M * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_pois(lat, lon, radius_m):
     amen_re = "|".join(AMENITIES)
     q = f"""
@@ -199,6 +216,7 @@ def fetch_pois(lat, lon, radius_m):
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_residential(lat, lon, radius_m):
     b_re = "|".join(RES_BUILDINGS)
     q = f"""
