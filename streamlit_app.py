@@ -7,13 +7,12 @@ import streamlit as st
 import plotly.graph_objects as go
 import pydeck as pdk
 
-# ---- Overpass mirrors (rotate on failure) ----
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
-    "https://overpass.nchc.org.tw/api/interpreter",
-]
+# ---- Overpass API (main public instance) ----
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Operators ask for an identifying User-Agent with contact info
+OVERPASS_USER_AGENT = "citydata-streamlit-app/1.0 (+https://github.com/bukthorn/citydata)"
+# After 429/504 the server asks to pause at least 30 s; repeated 429s get banned
+OVERPASS_MIN_WAIT_SEC = 30.0
 
 AMENITIES = [
     "restaurant",
@@ -115,40 +114,47 @@ def estimate_floors(building_type: str, tags: Dict[str, str]) -> int:
     return int(DEFAULT_FLOORS_BY_TYPE.get(building_type, 2))
 
 
-def overpass(query: str,
-             retries: int = 6,
-             backoff_sec: float = 3.0) -> Dict[str, Any]:
+def overpass(query: str, attempts: int = 3) -> Dict[str, Any]:
     headers = {
         "Accept": "application/json",
-        "User-Agent": "citydata-streamlit-app/1.0",
+        "User-Agent": OVERPASS_USER_AGENT,
     }
-    last_err = None
-    for attempt in range(retries):
-        url = OVERPASS_URLS[attempt % len(OVERPASS_URLS)]
+    errors = []
+    for attempt in range(attempts):
+        if attempt > 0:
+            time.sleep(OVERPASS_MIN_WAIT_SEC * attempt)
         try:
-            r = requests.post(url,
+            r = requests.post(OVERPASS_URL,
                               data=query.encode("utf-8"),
                               headers=headers,
-                              timeout=240)
-            if r.status_code == 429 or r.status_code == 504:
-                retry_after = r.headers.get("Retry-After")
-                if retry_after is not None:
-                    try:
-                        wait = float(retry_after)
-                    except ValueError:
-                        wait = backoff_sec * (attempt + 2)
-                else:
-                    wait = backoff_sec * (attempt + 2)
-                last_err = requests.HTTPError(f"Overpass HTTP {r.status_code}")
-                time.sleep(wait)
-                continue
-            if r.status_code >= 400:
-                raise requests.HTTPError(f"Overpass HTTP {r.status_code}")
-            return r.json()
-        except Exception as e:
-            last_err = e
-            time.sleep(backoff_sec * (attempt + 1))
-    raise last_err
+                              timeout=300)
+        except requests.RequestException as e:
+            errors.append(f"attempt {attempt + 1}: {type(e).__name__}")
+            continue
+
+        if r.status_code == 429:
+            errors.append(f"attempt {attempt + 1}: HTTP 429 (too many requests)")
+            continue
+        if r.status_code == 504:
+            errors.append(f"attempt {attempt + 1}: HTTP 504 (server busy)")
+            continue
+        if r.status_code >= 500:
+            errors.append(f"attempt {attempt + 1}: HTTP {r.status_code}")
+            continue
+        if r.status_code >= 400:
+            # 400 = query syntax error, 406 = client blocked: retrying won't help
+            raise RuntimeError(
+                f"Overpass HTTP {r.status_code}: {r.text[:300].strip()}")
+
+        data = r.json()
+        # Server-side timeout/memory limit: HTTP 200 but the data is incomplete
+        remark = data.get("remark") or ""
+        if "runtime error" in remark.lower():
+            errors.append(f"attempt {attempt + 1}: {remark.strip()}")
+            continue
+        return data
+
+    raise RuntimeError("Overpass API did not respond. " + "; ".join(errors))
 
 
 def parse_population(tags: Dict[str, str]) -> int:
@@ -412,7 +418,7 @@ def main():
             st.info("No POIs to show on the map for this city.")
         
         else:
-            # --- Map via Plotly Mapbox: legend overlays map + interactive toggle by type ---
+            # --- Map via Plotly Map (MapLibre): legend overlays map + interactive toggle by type ---
             pois_df = pois_df.copy()
 
             # гарантируем наличие amenity и приводим к строке
@@ -440,7 +446,7 @@ def main():
                 for t in present_types:
                     sub = pois_df[pois_df["poi_type"] == t]
                     map_fig.add_trace(
-                        go.Scattermapbox(
+                        go.Scattermap(
                             lat=sub["lat"].astype(float).tolist(),
                             lon=sub["lon"].astype(float).tolist(),
                             mode="markers",
@@ -455,7 +461,7 @@ def main():
                 other = pois_df[~pois_df["poi_type"].isin(present_types)]
                 if not other.empty:
                     map_fig.add_trace(
-                        go.Scattermapbox(
+                        go.Scattermap(
                             lat=other["lat"].astype(float).tolist(),
                             lon=other["lon"].astype(float).tolist(),
                             mode="markers",
@@ -467,7 +473,7 @@ def main():
                     )
 
                 map_fig.update_layout(
-                    mapbox=dict(
+                    map=dict(
                         style="carto-darkmatter",
                         center=dict(lat=float(center["lat"]), lon=float(center["lon"])),
                         zoom=10,
@@ -573,7 +579,7 @@ def main():
 
                 # Рисуем квадраты как choropleth
                 map_fig.add_trace(
-                    go.Choroplethmapbox(
+                    go.Choroplethmap(
                         geojson=geojson,
                         locations=grid["cell_id"].tolist(),
                         z=grid["poi_per_km2"].astype(float).tolist(),
@@ -592,7 +598,7 @@ def main():
                 )
 
                 map_fig.update_layout(
-                    mapbox=dict(
+                    map=dict(
                         style="carto-darkmatter",
                         center=dict(lat=lat0, lon=lon0),
                         zoom=10,
